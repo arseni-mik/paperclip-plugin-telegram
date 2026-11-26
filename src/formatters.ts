@@ -168,7 +168,7 @@ export function formatIssueAssigned(event: PluginEvent, opts?: IssueLinksOpts): 
   };
 }
 
-export function formatIssueDone(event: PluginEvent, opts?: IssueLinksOpts): FormattedMessage {
+export function formatIssueDone(event: PluginEvent, opts?: IssueLinksOpts, commentLimit = 300): FormattedMessage {
   const p = event.payload as Payload;
   const identifier = str(p.identifier, event.entityId);
   const title = str(p.title);
@@ -181,7 +181,8 @@ export function formatIssueDone(event: PluginEvent, opts?: IssueLinksOpts): Form
   ];
 
   if (comment) {
-    const truncated = truncateAtWord(comment, 300);
+    // Capped so the formatted message stays under Telegram's size limit.
+    const truncated = truncateAtWord(comment, Math.min(commentLimit, 3000));
     lines.push(`\n${esc(">")} ${esc(truncated)}`);
   }
 

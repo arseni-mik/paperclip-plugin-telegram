@@ -4,14 +4,14 @@ import { sendMessage, escapeMarkdownV2, sendChatAction } from "./telegram-api.js
 import { METRIC_NAMES } from "./constants.js";
 import { getSessions, wakeAgentWithIssue } from "./acp-bridge.js";
 import { resolveMappedProjectIdForTopic } from "./topic-projects.js";
-import { normalizeSecretRef } from "./secret-ref-validation.js";
+import { isTranscriptionEnabled, transcribeAudio, type TranscriptionConfig } from "./transcription.js";
 
 const TELEGRAM_API = "https://api.telegram.org";
 
-type MediaConfig = {
+type MediaConfig = TranscriptionConfig & {
   briefAgentId: string;
   briefAgentChatIds: string[];
-  transcriptionApiKeyRef: string;
+  enableAcp?: boolean;
   publicUrl?: string;
 };
 
@@ -40,7 +40,7 @@ export async function handleMediaMessage(
 
   // Determine if this is an intake channel (brief agent) or an agent thread
   const isIntakeChannel = config.briefAgentChatIds.includes(chatId);
-  const hasActiveSession = threadId
+  const hasActiveSession = config.enableAcp && threadId
     ? (await getSessions(ctx, chatId, threadId)).some((s) => s.status === "active")
     : false;
 
@@ -59,9 +59,9 @@ export async function handleMediaMessage(
   let textContent = msg.caption ?? "";
 
   // Transcribe audio/voice if applicable
-  if (isAudio && config.transcriptionApiKeyRef) {
+  if (isAudio && isTranscriptionEnabled(config)) {
     try {
-      const transcription = await transcribeAudio(ctx, token, fileId, config.transcriptionApiKeyRef, companyId);
+      const transcription = await transcribeAudio(ctx, token, fileId, config, companyId);
       if (transcription) {
         textContent = transcription;
 
@@ -170,58 +170,6 @@ function extractFileId(msg: TelegramMediaMessage): string | null {
     return msg.photo.sort((a, b) => b.width * b.height - a.width * a.height)[0]!.file_id;
   }
   return null;
-}
-
-async function transcribeAudio(
-  ctx: PluginContext,
-  botToken: string,
-  fileId: string,
-  transcriptionApiKeyRef: string,
-  companyId: string,
-): Promise<string | null> {
-  // 1. Get file path from Telegram (JSON response — ctx.http.fetch works fine for this)
-  const fileRes = await ctx.http.fetch(
-    `${TELEGRAM_API}/bot${botToken}/getFile?file_id=${fileId}`,
-    { method: "GET" },
-  );
-  const fileData = (await fileRes.json()) as { ok: boolean; result?: { file_path?: string } };
-  if (!fileData.ok || !fileData.result?.file_path) {
-    ctx.logger.error("Failed to get file path from Telegram", { fileId });
-    return null;
-  }
-
-  // 2. Download binary audio using native fetch (bypasses RPC bridge UTF-8 corruption)
-  const downloadUrl = `${TELEGRAM_API}/file/bot${botToken}/${fileData.result.file_path}`;
-  const audioRes = await fetch(downloadUrl);
-  const audioBuffer = Buffer.from(await audioRes.arrayBuffer());
-
-  // 3. Resolve the OpenAI API key from Paperclip secrets
-  const normalizedRef = normalizeSecretRef(transcriptionApiKeyRef);
-  if (!normalizedRef) {
-    ctx.logger.error("Invalid transcription API key secret reference", { companyId });
-    return null;
-  }
-  const apiKey = await ctx.secrets.resolve(normalizedRef, {
-    companyId,
-    configPath: "transcriptionApiKeyRef",
-  });
-
-  // 4. Build multipart form data manually (native FormData + Blob works in Node 18+)
-  const formData = new FormData();
-  formData.append("file", new Blob([audioBuffer], { type: "audio/ogg" }), "audio.ogg");
-  formData.append("model", "whisper-1");
-
-  // 5. Send to Whisper API using native fetch (FormData can't be serialized through RPC bridge)
-  const whisperRes = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: formData,
-  });
-
-  const whisperData = (await whisperRes.json()) as { text?: string };
-  return whisperData.text ?? null;
 }
 
 function buildBriefPrompt(msg: TelegramMediaMessage, textContent: string): string {

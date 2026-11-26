@@ -7,6 +7,58 @@ Bidirectional Telegram integration for [Paperclip](https://github.com/paperclipa
 
 Built on the Paperclip plugin SDK and the domain event bridge ([PR #909](https://github.com/paperclipai/paperclip/pull/909)).
 
+## Changes in this fork
+
+This fork adds an agent chat and a configurable speech-to-text service, and makes two optional features opt-in. Releases are versioned `<upstream version>-chat.<n>`.
+
+### Chat with an agent
+
+With chat enabled, a plain message in a private chat with the bot is posted on a task as a comment **from your board user**, which wakes the agent assigned to it. The agent's comments on that task are sent back to Telegram. There is one task per chat and agent; the agent closes it after answering and the next message reopens it. Chat tasks raise no "issue created/done" notifications.
+
+| Setting | Meaning |
+|---|---|
+| `enableChat` | Off by default. Requires a non-empty `allowedTelegramUserIds`: chat never accepts "anyone" |
+| `chatAgent` | Name or ID of the agent that answers by default |
+| `chatUserId` | ID of the Paperclip board user the messages are attributed to |
+| `chatMentionAgents` | Other agents that may be addressed with `@name message` |
+
+Chat needs the `issue.comments.create_human_attributed` capability, which Paperclip asks you to accept when upgrading.
+
+With chat enabled, a reply to a bot notification in the private chat is sent to the default chat agent as `Re <task>: <your text>`, so one agent routes your decisions, including replies about tasks that are already closed. Replies to an agent's escalation question still go to that question.
+
+Anyone who can write from an allowlisted Telegram account can instruct your agents as that board user. Keep the allowlist to yourself.
+
+### Notifications
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `notificationMaxLength` | `300` | Length of the completion comment in "issue done" messages. `0` sends all of it, split into several messages |
+| `notifyOnlyAgents` | empty (all) | Send "issue created" and "issue done" only for tasks assigned to these agents, for example a single coordinating agent. Approvals and errors are unaffected |
+
+### Speech-to-text
+
+Voice messages work with any OpenAI-compatible transcription endpoint (`POST <base>/audio/transcriptions`).
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `transcriptionBaseUrl` | `https://api.openai.com/v1` | Base URL of the service, for example a self-hosted one on `http://127.0.0.1:8000/v1` |
+| `transcriptionModel` | `whisper-1` | Model name the service expects |
+| `transcriptionLanguage` | empty | Language code, or empty to auto-detect |
+| `transcriptionApiKeyRef` | empty | Secret with the API key. Required for OpenAI, optional for other endpoints |
+
+Transcription is active when a key is set or the base URL differs from the default. The audio, and the key if set, are sent to that URL. In a chat, the bot shows what it heard and passes the text to the agent.
+
+### Opt-in features
+
+| Setting | Default | Covers |
+|---|---|---|
+| `enableAcp` | off | `/acp`, thread routing to agent sessions, the handoff and discuss tools |
+| `enableCustomCommands` | off | `/commands`, custom workflow commands and their approval buttons |
+
+### Releasing
+
+Push a tag such as `v0.8.1-chat.1` that matches the version in `package.json`. The release workflow tests and builds the plugin and attaches the package and its SHA-256 checksum to a GitHub release. Install it by downloading the package, verifying the checksum, unpacking it and installing the folder as a local plugin.
+
 ## Why this exists
 
 Multiple Paperclip users asked for notifications on the same day the plugin system shipped (2026-03-14):

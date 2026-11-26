@@ -102,6 +102,17 @@ type TelegramMediaConfig = {
   transcriptionApiKeyRef: string;
   briefAgentId: string;
   briefAgentChatIds: string[];
+  enableChat: boolean;
+  chatAgent: string;
+  chatUserId: string;
+  chatMentionAgents: string[];
+  transcriptionBaseUrl: string;
+  transcriptionModel: string;
+  transcriptionLanguage: string;
+  enableAcp: boolean;
+  enableCustomCommands: boolean;
+  notificationMaxLength: number;
+  notifyOnlyAgents: string[];
 };
 
 type TelegramEscalationConfig = {
@@ -168,6 +179,17 @@ const DEFAULT_MEDIA_CONFIG: TelegramMediaConfig = {
   transcriptionApiKeyRef: "",
   briefAgentId: "",
   briefAgentChatIds: [],
+  enableChat: false,
+  chatAgent: "",
+  chatUserId: "",
+  chatMentionAgents: [],
+  transcriptionBaseUrl: "https://api.openai.com/v1",
+  transcriptionModel: "whisper-1",
+  transcriptionLanguage: "",
+  enableAcp: false,
+  enableCustomCommands: false,
+  notificationMaxLength: 300,
+  notifyOnlyAgents: [],
 };
 
 const DEFAULT_ESCALATION_CONFIG: TelegramEscalationConfig = {
@@ -318,6 +340,17 @@ function extractMediaConfig(config: Record<string, unknown>): TelegramMediaConfi
     transcriptionApiKeyRef: asString(config.transcriptionApiKeyRef),
     briefAgentId: asString(config.briefAgentId),
     briefAgentChatIds: asStringArray(config.briefAgentChatIds),
+    enableChat: config.enableChat === true,
+    chatAgent: asString(config.chatAgent),
+    chatUserId: asString(config.chatUserId),
+    chatMentionAgents: asStringArray(config.chatMentionAgents),
+    transcriptionBaseUrl: asString(config.transcriptionBaseUrl) || DEFAULT_MEDIA_CONFIG.transcriptionBaseUrl,
+    transcriptionModel: asString(config.transcriptionModel) || DEFAULT_MEDIA_CONFIG.transcriptionModel,
+    transcriptionLanguage: asString(config.transcriptionLanguage),
+    enableAcp: config.enableAcp === true,
+    enableCustomCommands: config.enableCustomCommands === true,
+    notificationMaxLength: typeof config.notificationMaxLength === "number" ? config.notificationMaxLength : 300,
+    notifyOnlyAgents: asStringArray(config.notifyOnlyAgents),
   };
 }
 
@@ -1072,7 +1105,7 @@ export function TelegramSettingsPage({ context }: PluginSettingsPageProps): Reac
       setMediaSnapshot(mediaConfig);
       setMediaMessage({
         tone: "success",
-        title: "Media intake settings saved",
+        title: "Settings saved",
         text: "Media in configured intake chats is routed to the Brief Agent. Media in other chats can still go to active topic agent sessions.",
       });
     } catch (error) {
@@ -1980,6 +2013,83 @@ export function TelegramSettingsPage({ context }: PluginSettingsPageProps): Reac
         }}
       >
         <div style={{ display: "grid", gap: 4 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Chat, voice and optional features</h2>
+          <p style={{ color: "#6b7280", margin: 0 }}>
+            Lets allowlisted users talk to an agent in a private chat, and chooses the speech-to-text service for voice messages.
+          </p>
+        </div>
+
+        <div style={{ display: "grid", gap: 12 }}>
+          <CheckboxField checked={mediaConfig.enableChat} disabled={mediaLoading || mediaSaving} label="Enable chat" onChange={(value) => updateMediaField("enableChat", value)}>
+            Plain private messages are sent to an agent and its answers come back. Needs at least one allowed Telegram user ID.
+          </CheckboxField>
+          <TextField disabled={mediaLoading || mediaSaving} label="Chat agent" onChange={(value) => updateMediaField("chatAgent", value)} placeholder="Agent name or ID" value={mediaConfig.chatAgent}>
+            The agent that answers by default.
+          </TextField>
+          <TextField disabled={mediaLoading || mediaSaving} label="Paperclip user ID" onChange={(value) => updateMediaField("chatUserId", value)} placeholder="Your Paperclip user ID" value={mediaConfig.chatUserId}>
+            Messages are posted as comments from this board user, which wakes the agent.
+          </TextField>
+          <ArrayField disabled={mediaLoading || mediaSaving} emptyValueLabel="Only the default agent" label="Agents that can be mentioned" newItemLabel="Add agent" onChange={(value) => updateMediaField("chatMentionAgents", value)} placeholder="Agent name or ID" value={mediaConfig.chatMentionAgents}>
+            Start a message with @name to talk to one of these agents instead.
+          </ArrayField>
+          <TextField disabled={mediaLoading || mediaSaving} label="Transcription base URL" onChange={(value) => updateMediaField("transcriptionBaseUrl", value)} placeholder="https://api.openai.com/v1" value={mediaConfig.transcriptionBaseUrl}>
+            Any OpenAI-compatible endpoint; /audio/transcriptions is added. Audio is sent to this address.
+          </TextField>
+          <TextField disabled={mediaLoading || mediaSaving} label="Transcription model" onChange={(value) => updateMediaField("transcriptionModel", value)} placeholder="whisper-1" value={mediaConfig.transcriptionModel}>
+            Model name the endpoint expects.
+          </TextField>
+          <TextField disabled={mediaLoading || mediaSaving} label="Transcription language" onChange={(value) => updateMediaField("transcriptionLanguage", value)} placeholder="en" value={mediaConfig.transcriptionLanguage}>
+            Optional language code. Leave empty to let the service detect it.
+          </TextField>
+          <CheckboxField checked={mediaConfig.notificationMaxLength === 0} disabled={mediaLoading || mediaSaving} label="Send completion comments in full" onChange={(value) => updateMediaField("notificationMaxLength", value ? 0 : 300)}>
+            Otherwise the comment is cut at 300 characters. Long comments are split into several messages.
+          </CheckboxField>
+          <ArrayField disabled={mediaLoading || mediaSaving} emptyValueLabel="All agents" label="Notify only about tasks of these agents" newItemLabel="Add agent" onChange={(value) => updateMediaField("notifyOnlyAgents", value)} placeholder="Agent name or ID" value={mediaConfig.notifyOnlyAgents}>
+            Limits the issue created and issue done notifications. Approvals and errors are not affected.
+          </ArrayField>
+          <CheckboxField checked={mediaConfig.enableAcp} disabled={mediaLoading || mediaSaving} label="Enable agent sessions (ACP bridge)" onChange={(value) => updateMediaField("enableAcp", value)}>
+            The /acp command, thread routing to agent sessions, and the handoff and discuss tools.
+          </CheckboxField>
+          <CheckboxField checked={mediaConfig.enableCustomCommands} disabled={mediaLoading || mediaSaving} label="Enable custom workflow commands" onChange={(value) => updateMediaField("enableCustomCommands", value)}>
+            Lets allowed users import workflows from Telegram, including steps that make web requests.
+          </CheckboxField>
+        </div>
+
+        {mediaMessage ? <NoticeBlock notice={mediaMessage} /> : null}
+
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button
+            disabled={mediaLoading || mediaSaving || !mediaDirty}
+            onClick={() => {
+              void handleSaveMediaConfig();
+            }}
+            style={{
+              background: mediaLoading || mediaSaving || !mediaDirty ? "#9ca3af" : "#111827",
+              border: 0,
+              borderRadius: 8,
+              color: "white",
+              cursor: mediaLoading || mediaSaving || !mediaDirty ? "not-allowed" : "pointer",
+              fontWeight: 700,
+              minWidth: 160,
+              padding: "10px 14px",
+            }}
+            type="button"
+          >
+            {mediaSaving ? "Saving..." : "Save chat and voice"}
+          </button>
+        </div>
+      </section>
+
+      <section
+        style={{
+          border: "1px solid #e5e7eb",
+          borderRadius: 8,
+          display: "grid",
+          gap: 18,
+          padding: 18,
+        }}
+      >
+        <div style={{ display: "grid", gap: 4 }}>
           <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Media Intake / Brief Agent</h2>
           <p style={{ color: "#6b7280", margin: 0 }}>
             Routes Telegram voice, audio, documents, and photos either to a Brief Agent intake flow or to active agent sessions inside forum topics.
@@ -1990,12 +2100,12 @@ export function TelegramSettingsPage({ context }: PluginSettingsPageProps): Reac
           <SecretRefField
             companyId={companyId}
             disabled={mediaLoading || mediaSaving}
-            label="OpenAI transcription secret"
+            label="Transcription API key secret"
             onChange={(value) => updateMediaField("transcriptionApiKeyRef", value)}
-            placeholder="OpenAI API key secret UUID fallback"
+            placeholder="API key secret UUID"
             value={mediaConfig.transcriptionApiKeyRef}
           >
-            Select the company secret used for audio transcription. Secret values are never shown to the plugin UI.
+            Company secret holding the key for the transcription endpoint. Required for OpenAI; leave empty for a self-hosted endpoint without a key. Secret values are never shown to the plugin UI.
           </SecretRefField>
           <TextField
             disabled={mediaLoading || mediaSaving}
