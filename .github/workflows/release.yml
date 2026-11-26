@@ -1,0 +1,36 @@
+name: Release
+
+# Builds a verifiable package for tags like v0.8.1-chat.1. Upstream tags
+# (v0.8.1) do not match, so syncing the fork never creates a release.
+on:
+  push:
+    tags: ["v*-chat.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+      - name: Check the tag matches the package version
+        run: |
+          VERSION="v$(node -p "require('./package.json').version")"
+          test "$VERSION" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME does not match package version $VERSION"; exit 1; }
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run test
+      - run: npm run build
+      - name: Package and checksum
+        run: |
+          mkdir release
+          npm pack --ignore-scripts --pack-destination release
+          cd release && sha256sum *.tgz > SHA256SUMS && cat SHA256SUMS
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/*.tgz release/SHA256SUMS --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
