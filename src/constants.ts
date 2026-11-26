@@ -1,5 +1,5 @@
 export const PLUGIN_ID = "paperclip-plugin-telegram";
-export const PLUGIN_VERSION = "0.8.1";
+export const PLUGIN_VERSION = "0.8.1-chat.1";
 export const MAX_AGENTS_PER_THREAD = 5;
 
 export const DEFAULT_CONFIG = {
@@ -41,6 +41,21 @@ export const DEFAULT_CONFIG = {
   briefAgentId: "",
   briefAgentChatIds: [] as string[],
   transcriptionApiKeyRef: "",
+  transcriptionBaseUrl: "https://api.openai.com/v1",
+  transcriptionModel: "whisper-1",
+  transcriptionLanguage: "",
+  // Chat: plain private messages are answered by an agent
+  enableChat: false,
+  chatAgent: "",
+  chatUserId: "",
+  chatMentionAgents: [] as string[],
+  // Notifications: 0 sends the whole completion comment (split as needed)
+  notificationMaxLength: 300,
+  // Issue created/done notifications only for tasks of these agents (empty: all)
+  notifyOnlyAgents: [] as string[],
+  // Optional features, off unless switched on
+  enableAcp: false,
+  enableCustomCommands: false,
   // Phase 5: Proactive Suggestions
   maxSuggestionsPerHourPerCompany: 10,
   watchDeduplicationWindowMs: 86400000, // 24h

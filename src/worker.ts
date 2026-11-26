@@ -16,6 +16,7 @@ import {
   escapeMarkdownV2,
   isForum,
   GENERAL_TOPIC_THREAD_ID,
+  sendChatAction,
 } from "./telegram-api.js";
 import {
   formatIssueCreated,
@@ -52,6 +53,8 @@ import { handleRegisterWatch, checkWatches } from "./watch-registry.js";
 import { AGENT_ERROR_DEDUPLICATION_WINDOW_MS, DEFAULT_CONFIG, METRIC_NAMES } from "./constants.js";
 import { EscalationManager } from "./escalation.js";
 import type { EscalationEvent } from "./escalation.js";
+import { forwardChatReply, handleChatMessage, isChatEnabled, isChatIssueEvent, isNotifiableAgentIssue, splitMessage } from "./chat.js";
+import { isTranscriptionEnabled, transcribeAudio, validateTranscriptionConfig } from "./transcription.js";
 import { isTelegramUpdateAllowed, validateTelegramAllowlists } from "./allowlist.js";
 import { normalizeSecretRef, validateSecretRefFields } from "./secret-ref-validation.js";
 import { shouldNotifyApproval } from "./approval-routing.js";
@@ -99,6 +102,20 @@ type TelegramConfig = {
   briefAgentId: string;
   briefAgentChatIds: string[];
   transcriptionApiKeyRef: string;
+  transcriptionBaseUrl?: string;
+  transcriptionModel?: string;
+  transcriptionLanguage?: string;
+  // Chat with an agent
+  enableChat?: boolean;
+  chatAgent?: string;
+  chatUserId?: string;
+  chatMentionAgents?: string[];
+  // Notifications
+  notificationMaxLength?: number;
+  notifyOnlyAgents?: string[];
+  // Optional features, off unless switched on
+  enableAcp?: boolean;
+  enableCustomCommands?: boolean;
   // Phase 5: Proactive Suggestions
   maxSuggestionsPerHourPerCompany: number;
   watchDeduplicationWindowMs: number;
@@ -616,10 +633,10 @@ async function bootstrapRuntime(
 
   // --- Register bot commands with Telegram ---
   if (config.enableCommands) {
-    const allCommands = [
-      ...BOT_COMMANDS,
-      { command: "commands", description: "Manage custom workflow commands" },
-    ];
+    // BOT_COMMANDS already contains "commands"; disabled features are not advertised.
+    const allCommands = BOT_COMMANDS.filter((c) =>
+      (c.command !== "acp" || config.enableAcp === true) &&
+      (c.command !== "commands" || config.enableCustomCommands === true));
     // Non-blocking: this runs from onConfigChanged, which the host also
     // subjects to an RPC timeout, and api.telegram.org being slow must not
     // fail a config save. Idempotent on Telegram's side, so re-registering on
@@ -664,7 +681,7 @@ async function pollUpdates(ctx: PluginContext): Promise<void> {
   let lastUpdateId = await getPersistedTelegramUpdateOffset(ctx);
   while (pollingActive) {
     const rt = runtime;
-    if (!rt || !(rt.config.enableCommands || rt.config.enableInbound)) {
+    if (!rt || !(rt.config.enableCommands || rt.config.enableInbound || isChatEnabled(rt.config))) {
       await new Promise((r) => setTimeout(r, 2000));
       continue;
     }
@@ -727,6 +744,8 @@ async function notify(
   formatter: (e: PluginEvent, opts?: IssueLinksOpts) => { text: string; options: import("./telegram-api.js").SendMessageOptions },
   overrideChatId?: string,
   overrideTopicId?: string,
+  // Further plain-text messages that belong to the same notification.
+  followUps: string[] = [],
 ): Promise<void> {
   const chatId = await resolveChat(
     ctx,
@@ -766,18 +785,21 @@ async function notify(
   const messageId = await sendMessage(ctx, rt.token, chatId, msg.text, msg.options);
 
   if (messageId) {
-    await ctx.state.set(
-      {
-        scopeKind: "instance",
-        stateKey: `msg_${chatId}_${messageId}`,
-      },
-      {
-        entityId: event.entityId,
-        entityType: event.entityType,
-        companyId: event.companyId,
-        eventType: event.eventType,
-      },
-    );
+    const link = {
+      entityId: event.entityId,
+      entityType: event.entityType,
+      companyId: event.companyId,
+      eventType: event.eventType,
+    };
+    await ctx.state.set({ scopeKind: "instance", stateKey: `msg_${chatId}_${messageId}` }, link);
+    for (const part of followUps) {
+      const partId = await sendMessage(ctx, rt.token, chatId, part, {
+        messageThreadId,
+        disableNotification: true,
+      });
+      // Linked too, so a reply to any part reaches the same task.
+      if (partId) await ctx.state.set({ scopeKind: "instance", stateKey: `msg_${chatId}_${partId}` }, link);
+    }
 
     await ctx.activity.log({
       companyId: event.companyId,
@@ -846,13 +868,22 @@ export const plugin = definePlugin({
     });
 
     // --- Phase 2: ACP output listener (cross-plugin events) ---
-    setupAcpOutputListener(ctx, () => runtime?.token ?? null);
+    setupAcpOutputListener(ctx, () => (runtime?.config.enableAcp ? runtime.token : null));
+
+    // --- Chat: send agent answers on chat tasks back to Telegram ---
+    ctx.events.on("issue.comment.created", async (event: PluginEvent) => {
+      const rt = ensureRuntime();
+      if (!rt || !isChatEnabled(rt.config)) return;
+      await forwardChatReply(ctx, rt.token, event);
+    });
 
     // --- Event subscriptions ---
 
     ctx.events.on("issue.created", async (event: PluginEvent) => {
       const rt = ensureRuntime();
       if (!rt || !rt.config.notifyOnIssueCreated) return;
+      if (await isChatIssueEvent(ctx, event)) return;
+      if (!(await isNotifiableAgentIssue(ctx, event, rt.config.notifyOnlyAgents))) return;
       await notify(ctx, rt, event, formatIssueCreated);
     });
 
@@ -861,6 +892,8 @@ export const plugin = definePlugin({
       if (!rt || !rt.config.notifyOnIssueDone) return;
       const payload = event.payload as Record<string, unknown>;
       if (payload.status !== "done") return;
+      if (await isChatIssueEvent(ctx, event)) return;
+      if (!(await isNotifiableAgentIssue(ctx, event, rt.config.notifyOnlyAgents))) return;
       if (!doneDedupe(`done|${event.entityId}`)) return;
       // Enrich with title/priority if missing (issue.updated events often omit them;
       // priority drives the disableNotification policy in formatIssueDone)
@@ -885,7 +918,13 @@ export const plugin = definePlugin({
           }
         } catch { /* best effort */ }
       }
-      await notify(ctx, rt, event, formatIssueDone);
+      const limit = rt.config.notificationMaxLength ?? 300;
+      let followUps: string[] = [];
+      if (limit <= 0 && typeof payload.comment === "string") {
+        followUps = splitMessage(payload.comment);
+        delete payload.comment;
+      }
+      await notify(ctx, rt, event, (e, opts) => formatIssueDone(e, opts, limit), undefined, undefined, followUps);
     });
 
     ctx.events.on("issue.updated", async (event: PluginEvent) => {
@@ -899,6 +938,7 @@ export const plugin = definePlugin({
       const agentChanged =
         "assigneeAgentId" in payload && payload.assigneeAgentId !== prev.assigneeAgentId;
       if (!userChanged && !agentChanged) return;
+      if (await isChatIssueEvent(ctx, event)) return;
 
       if (rt.config.onlyNotifyIfAssignedTo && payload.assigneeUserId !== rt.config.onlyNotifyIfAssignedTo) {
         return;
@@ -1293,6 +1333,7 @@ export const plugin = definePlugin({
     }, async (params: unknown, runCtx) => {
       const rt = ensureRuntime();
       if (!rt) return { error: "Telegram plugin is not configured yet" };
+      if (!rt.config.enableAcp) return { error: "Agent handoff is disabled in the Telegram plugin settings." };
       return handleHandoffToolCall(ctx, rt.token, params as Record<string, unknown>, runCtx.companyId, runCtx.agentId);
     });
 
@@ -1316,6 +1357,7 @@ export const plugin = definePlugin({
     }, async (params: unknown, runCtx) => {
       const rt = ensureRuntime();
       if (!rt) return { error: "Telegram plugin is not configured yet" };
+      if (!rt.config.enableAcp) return { error: "Agent discussions are disabled in the Telegram plugin settings." };
       return handleDiscussToolCall(ctx, rt.token, params as Record<string, unknown>, runCtx.companyId, runCtx.agentId);
     });
 
@@ -1427,6 +1469,21 @@ export const plugin = definePlugin({
     if (allowlistErrors.length > 0) {
       return { ok: false, errors: allowlistErrors };
     }
+    const transcriptionErrors = validateTranscriptionConfig(config as Record<string, unknown>);
+    if (transcriptionErrors.length > 0) {
+      return { ok: false, errors: transcriptionErrors };
+    }
+    const chat = config as Record<string, unknown>;
+    if (chat.enableChat === true) {
+      const missing = [
+        !String(chat.chatAgent ?? "").trim() && "chatAgent",
+        !String(chat.chatUserId ?? "").trim() && "chatUserId",
+        !(Array.isArray(chat.allowedTelegramUserIds) && chat.allowedTelegramUserIds.length > 0) && "allowedTelegramUserIds",
+      ].filter(Boolean);
+      if (missing.length > 0) {
+        return { ok: false, errors: [`Chat needs these settings: ${missing.join(", ")}`] };
+      }
+    }
     const topicErrors = validateConfiguredTopicIds(config as Record<string, unknown>);
     if (topicErrors.length > 0) {
       return { ok: false, errors: topicErrors };
@@ -1463,6 +1520,10 @@ export async function handleUpdate(
   if (update.callback_query) {
     const companyId = await resolveCallbackCompanyId(ctx, update.callback_query);
     const boardApiToken = await resolveBoardApiToken(ctx, config, companyId);
+    if (config.enableCustomCommands !== true && isWorkflowApprovalCallback(update.callback_query.data ?? "")) {
+      await answerCallbackQuery(ctx, token, update.callback_query.id, "Custom workflows are disabled.");
+      return;
+    }
     await handleCallbackQuery(ctx, token, update.callback_query, baseUrl, boardApiToken);
     return;
   }
@@ -1473,6 +1534,37 @@ export async function handleUpdate(
   const chatId = String(msg.chat.id);
   const threadId = msg.message_thread_id;
 
+  // Chat applies to plain private messages only, from an allowlisted user.
+  const chatActive = isChatEnabled(config) && msg.chat.type === "private";
+  // A chat can be used without /connect when the plugin serves exactly one company.
+  const chatCompanyId = async () => (await resolveCompanyIdOrNull(ctx, chatId))
+    ?? (connectCompanyIds?.length === 1 ? connectCompanyIds[0]! : null);
+
+  // Voice notes in a chat: transcribe, show what was heard, send it to the agent.
+  const audio = msg.voice ?? msg.audio ?? msg.video_note;
+  if (chatActive && audio && !(config.briefAgentChatIds ?? []).includes(chatId)) {
+    const companyId = await chatCompanyId();
+    if (!companyId) return;
+    if (!isTranscriptionEnabled(config)) {
+      await sendMessage(ctx, token, chatId, "Voice messages need a transcription endpoint in the plugin settings.");
+      return;
+    }
+    let heard: string | null = null;
+    try {
+      await sendChatAction(ctx, token, chatId);
+      heard = await transcribeAudio(ctx, token, audio.file_id, config, companyId);
+    } catch (err) {
+      ctx.logger.error("Transcription failed", { error: String(err) });
+    }
+    if (!heard) {
+      await sendMessage(ctx, token, chatId, "I could not transcribe that voice message.");
+      return;
+    }
+    await sendMessage(ctx, token, chatId, `Heard: ${heard.slice(0, 1000)}`, { replyToMessageId: msg.message_id });
+    await handleChatMessage(ctx, token, config, { chatId, text: heard }, companyId);
+    return;
+  }
+
   // Phase 3: Handle media messages
   const hasMedia = !!(msg.voice || msg.audio || msg.video_note || msg.document || msg.photo);
   if (hasMedia) {
@@ -1482,6 +1574,10 @@ export async function handleUpdate(
         briefAgentId: config.briefAgentId ?? "",
         briefAgentChatIds: config.briefAgentChatIds ?? [],
         transcriptionApiKeyRef: config.transcriptionApiKeyRef ?? "",
+        transcriptionBaseUrl: config.transcriptionBaseUrl,
+        transcriptionModel: config.transcriptionModel,
+        transcriptionLanguage: config.transcriptionLanguage,
+        enableAcp: config.enableAcp === true,
         publicUrl,
       }, companyId);
       if (handled) return;
@@ -1495,7 +1591,7 @@ export async function handleUpdate(
   const text = msg.text;
 
   // Route thread messages to agent sessions
-  if (threadId) {
+  if (threadId && config.enableAcp === true) {
     const isCommand = text.startsWith("/");
     if (!isCommand) {
       const companyId = await resolveCompanyIdOrNull(ctx, chatId);
@@ -1519,12 +1615,18 @@ export async function handleUpdate(
     const companyId = (await resolveCompanyIdOrNull(ctx, chatId)) ?? undefined;
 
     // Phase 4: Check custom commands first
+    if ((command === "acp" && config.enableAcp !== true) || (command === "commands" && config.enableCustomCommands !== true)) {
+      await sendMessage(ctx, token, chatId, `/${command} is disabled in the plugin settings.`, { messageThreadId: threadId });
+      return;
+    }
+
     if (command === "commands") {
       await handleCommandsCommand(ctx, token, chatId, args, threadId, companyId);
       return;
     }
 
-    const handledCustom = await tryCustomCommand(ctx, token, chatId, command, args, threadId, companyId);
+    const handledCustom = config.enableCustomCommands === true
+      && await tryCustomCommand(ctx, token, chatId, command, args, threadId, companyId);
     if (handledCustom) return;
 
     // Built-in commands
@@ -1539,6 +1641,21 @@ export async function handleUpdate(
       scopeKind: "instance",
       stateKey: `msg_${chatId}_${replyToId}`,
     }) as { entityId: string; entityType: string; companyId: string } | null;
+
+    if (mapping && mapping.entityType !== "escalation" && chatActive) {
+      // Replies to notifications go to the chat agent, naming the task.
+      let about: string | undefined;
+      if (mapping.entityType === "issue") {
+        try {
+          const issue = await ctx.issues.get(mapping.entityId, mapping.companyId);
+          about = issue?.identifier ?? mapping.entityId;
+        } catch {
+          about = mapping.entityId;
+        }
+      }
+      await handleChatMessage(ctx, token, config, { chatId, text, about }, mapping.companyId);
+      return;
+    }
 
     if (mapping && mapping.entityType === "escalation") {
       const escalationManager = new EscalationManager();
@@ -1572,6 +1689,13 @@ export async function handleUpdate(
         });
       }
     }
+    if (mapping) return;
+  }
+
+  // Anything else typed in a private chat is a message for the agent.
+  if (chatActive && !botCommand) {
+    const companyId = await chatCompanyId();
+    if (companyId) await handleChatMessage(ctx, token, config, { chatId, text }, companyId);
   }
 }
 

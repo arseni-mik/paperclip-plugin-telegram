@@ -67,6 +67,8 @@ const DEFAULT_CONFIG_FIELDS = {
   notifyOnAgentRunStarted: false,
   notifyOnAgentRunFinished: false,
   enableCommands: true,
+  // Workflow approval buttons belong to custom commands, which are opt-in.
+  enableCustomCommands: true,
   enableInbound: true,
   allowedTelegramUserIds: [],
   allowedTelegramChatIds: [],
