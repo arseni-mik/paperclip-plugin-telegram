@@ -53,7 +53,7 @@ import { handleRegisterWatch, checkWatches } from "./watch-registry.js";
 import { AGENT_ERROR_DEDUPLICATION_WINDOW_MS, DEFAULT_CONFIG, METRIC_NAMES } from "./constants.js";
 import { EscalationManager } from "./escalation.js";
 import type { EscalationEvent } from "./escalation.js";
-import { forwardChatReply, handleChatMessage, isChatEnabled, isChatIssueEvent, isNotifiableAgentIssue, splitMessage } from "./chat.js";
+import { forwardChatReply, handleChatMessage, isChatEnabled, isChatIssueEvent, isNotifiableAgentIssue, updatedStatus, splitMessage } from "./chat.js";
 import { isTranscriptionEnabled, transcribeAudio, validateTranscriptionConfig } from "./transcription.js";
 import { isTelegramUpdateAllowed, validateTelegramAllowlists } from "./allowlist.js";
 import { normalizeSecretRef, validateSecretRefFields } from "./secret-ref-validation.js";
@@ -891,7 +891,7 @@ export const plugin = definePlugin({
       const rt = ensureRuntime();
       if (!rt || !rt.config.notifyOnIssueDone) return;
       const payload = event.payload as Record<string, unknown>;
-      if (payload.status !== "done") return;
+      if (updatedStatus(payload) !== "done") return;
       if (await isChatIssueEvent(ctx, event)) return;
       if (!(await isNotifiableAgentIssue(ctx, event, rt.config.notifyOnlyAgents))) return;
       if (!doneDedupe(`done|${event.entityId}`)) return;
