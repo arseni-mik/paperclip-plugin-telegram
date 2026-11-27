@@ -53,7 +53,7 @@ import { handleRegisterWatch, checkWatches } from "./watch-registry.js";
 import { AGENT_ERROR_DEDUPLICATION_WINDOW_MS, DEFAULT_CONFIG, METRIC_NAMES } from "./constants.js";
 import { EscalationManager } from "./escalation.js";
 import type { EscalationEvent } from "./escalation.js";
-import { forwardChatReply, handleChatMessage, isChatEnabled, isChatIssueEvent, isNotifiableAgentIssue, updatedStatus, splitMessage } from "./chat.js";
+import { forwardChatReply, handleChatMessage, isChatEnabled, isChatIssueEvent, isNotifiableAgentIssue, updatedStatus, closingComment, splitMessage } from "./chat.js";
 import { isTranscriptionEnabled, transcribeAudio, validateTranscriptionConfig } from "./transcription.js";
 import { isTelegramUpdateAllowed, validateTelegramAllowlists } from "./allowlist.js";
 import { normalizeSecretRef, validateSecretRefFields } from "./secret-ref-validation.js";
@@ -895,27 +895,23 @@ export const plugin = definePlugin({
       if (await isChatIssueEvent(ctx, event)) return;
       if (!(await isNotifiableAgentIssue(ctx, event, rt.config.notifyOnlyAgents))) return;
       if (!doneDedupe(`done|${event.entityId}`)) return;
-      // Enrich with title/priority if missing (issue.updated events often omit them;
+      // Enrich with identifier/title/priority if missing (issue.updated events often omit them;
       // priority drives the disableNotification policy in formatIssueDone)
-      if ((!payload.title || !payload.priority) && event.entityId) {
+      if ((!payload.identifier || !payload.title || !payload.priority) && event.entityId) {
         try {
           const issue = await ctx.issues.get(event.entityId, event.companyId);
           if (issue) {
+            payload.identifier ??= issue.identifier;
             payload.title ??= issue.title;
             payload.priority ??= issue.priority;
           }
         } catch { /* best effort */ }
       }
-      // Enrich with latest comment (completion summary)
+      // Enrich with the closing comment (completion summary)
       if (!payload.comment && event.entityId) {
         try {
-          const comments = await ctx.issues.listComments(event.entityId, event.companyId);
-          if (comments.length > 0) {
-            const latest = comments.reduce((a, b) =>
-              new Date(a.createdAt) > new Date(b.createdAt) ? a : b,
-            );
-            payload.comment = latest.body;
-          }
+          const body = await closingComment(ctx, event);
+          if (body !== undefined) payload.comment = body;
         } catch { /* best effort */ }
       }
       const limit = rt.config.notificationMaxLength ?? 300;

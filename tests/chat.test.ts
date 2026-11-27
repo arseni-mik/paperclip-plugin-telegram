@@ -22,7 +22,7 @@ vi.mock("../src/telegram-api.js", async () => {
 });
 
 import { handleUpdate } from "../src/worker.js";
-import { forwardChatReply, isChatEnabled, isChatIssueEvent, isNotifiableAgentIssue, splitMessage, updatedStatus } from "../src/chat.js";
+import { forwardChatReply, isChatEnabled, isChatIssueEvent, isNotifiableAgentIssue, splitMessage, updatedStatus, closingComment } from "../src/chat.js";
 import { formatIssueDone } from "../src/formatters.js";
 
 const CHAT = 1000;
@@ -242,5 +242,30 @@ describe("status of an updated task", () => {
     expect(updatedStatus({ source: "native_status_decision", fromStatus: "in_progress", toStatus: "done" })).toBe("done");
     expect(updatedStatus({ source: "native_status_decision", fromStatus: "todo", toStatus: "blocked" })).toBe("blocked");
     expect(updatedStatus({ title: "renamed" })).toBeUndefined();
+  });
+});
+
+describe("closing comment of a finished task", () => {
+  const closed = "2026-01-01T10:00:00.000Z";
+  const old = { body: "earlier note", createdAt: "2026-01-01T09:00:00.000Z" };
+  const final = { body: "the full report", createdAt: "2026-01-01T10:00:00.200Z" };
+  const run = async (payload: Record<string, unknown>, replies: unknown[][]) => {
+    const listComments = vi.fn(async () => replies[Math.min(listComments.mock.calls.length - 1, replies.length - 1)]);
+    const ctx = { issues: { listComments } } as never;
+    const body = await closingComment(ctx, { entityId: "i", companyId: "c", occurredAt: closed, payload } as never, { attempts: 4, waitMs: 1 });
+    return { body, calls: listComments.mock.calls.length };
+  };
+
+  it("waits for the comment saved just after Paperclip closed the task", async () => {
+    expect(await run({ toStatus: "done" }, [[], [old], [old, final]])).toEqual({ body: "the full report", calls: 3 });
+  });
+
+  it("does not wait when the status was set through the API", async () => {
+    expect(await run({ status: "done" }, [[old]])).toEqual({ body: "earlier note", calls: 1 });
+  });
+
+  it("gives up after the last attempt and sends what there is", async () => {
+    expect(await run({ toStatus: "done" }, [[old]])).toEqual({ body: "earlier note", calls: 4 });
+    expect(await run({ toStatus: "done" }, [[]])).toEqual({ body: undefined, calls: 4 });
   });
 });

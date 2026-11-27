@@ -51,6 +51,31 @@ export function updatedStatus(payload: Record<string, unknown>): unknown {
   return payload.status ?? payload.toStatus;
 }
 
+/**
+ * The text to send with a "task done" notification. When Paperclip closes a task
+ * itself at the end of an agent run, it publishes the status change a moment
+ * before the agent's closing comment is saved, so wait briefly for that comment.
+ */
+export async function closingComment(
+  ctx: PluginContext,
+  event: PluginEvent,
+  { attempts = 10, waitMs = 1_000, slackMs = 5_000 } = {},
+): Promise<string | undefined> {
+  const payload = event.payload as Record<string, unknown>;
+  const closedByPaperclip = payload.status === undefined && payload.toStatus !== undefined;
+  const closedAt = Date.parse(String(event.occurredAt ?? "")) || Date.now();
+  for (let attempt = 1; ; attempt += 1) {
+    const comments = await ctx.issues.listComments(event.entityId!, event.companyId);
+    const latest = comments.length > 0
+      ? comments.reduce((a, b) => (new Date(a.createdAt) > new Date(b.createdAt) ? a : b))
+      : undefined;
+    const written = latest !== undefined && new Date(latest.createdAt).getTime() >= closedAt - slackMs;
+    // After the last attempt an older comment is still better than none.
+    if (!closedByPaperclip || written || attempt >= attempts) return latest?.body;
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+}
+
 export async function isNotifiableAgentIssue(
   ctx: PluginContext,
   event: PluginEvent,
