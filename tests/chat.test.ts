@@ -22,7 +22,7 @@ vi.mock("../src/telegram-api.js", async () => {
 });
 
 import { handleUpdate } from "../src/worker.js";
-import { forwardChatReply, isChatEnabled, isChatIssueEvent, isNotifiableAgentIssue, splitMessage } from "../src/chat.js";
+import { forwardChatReply, isChatEnabled, isChatIssueEvent, isNotifiableAgentIssue, splitMessage, updatedStatus } from "../src/chat.js";
 import { formatIssueDone } from "../src/formatters.js";
 
 const CHAT = 1000;
@@ -232,5 +232,15 @@ describe("notification filter and length", () => {
     const done = { entityId: "x", payload: { identifier: "ABC-1", title: "T", comment: "word ".repeat(300) } } as never;
     expect(formatIssueDone(done).text.length).toBeLessThan(500);
     expect(formatIssueDone(done, undefined, 1000).text.length).toBeGreaterThan(900);
+  });
+});
+
+describe("status of an updated task", () => {
+  it("reads API changes and Paperclip's own status decisions alike", () => {
+    expect(updatedStatus({ status: "done" })).toBe("done");
+    // Shape Paperclip publishes when it closes a task at the end of an agent run.
+    expect(updatedStatus({ source: "native_status_decision", fromStatus: "in_progress", toStatus: "done" })).toBe("done");
+    expect(updatedStatus({ source: "native_status_decision", fromStatus: "todo", toStatus: "blocked" })).toBe("blocked");
+    expect(updatedStatus({ title: "renamed" })).toBeUndefined();
   });
 });

@@ -42,6 +42,15 @@ export function isChatEnabled(config: ChatConfig): boolean {
 }
 
 // True when the issue belongs to one of the listed agents, or no list is set.
+/**
+ * The new status carried by an `issue.updated` event. Changes made through the
+ * API report `status`; changes Paperclip applies itself when an agent run ends
+ * (native status decisions) report `toStatus` instead.
+ */
+export function updatedStatus(payload: Record<string, unknown>): unknown {
+  return payload.status ?? payload.toStatus;
+}
+
 export async function isNotifiableAgentIssue(
   ctx: PluginContext,
   event: PluginEvent,
